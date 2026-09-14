@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: tirtira-business-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main_web:app --host 0.0.0.0 --port $PORT
+    plan: free
