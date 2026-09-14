@@ -1,41 +1,29 @@
-# Tirtira Business Bot — Final Starter Version
+# Tirtira Business Studio V4
 
-Gemini-powered Amharic/English Telegram business assistant with:
-- Shortcut menu
-- Gemini AI
-- SQLite users/credits/jobs/payments/referrals
-- Starter credit bonus
-- Referral rewards
-- Buy Credits with Telebirr/CBE
-- Admin payment approval/rejection
-- FastAPI Telegram webhook for Render
+Telegram AI business bot with Gemini, credits, AI image/advertisement, Text→PDF, PDF→Text, Photo→PDF and PDF OCR workflow.
 
-## Render Environment Variables
-
+## Render environment variables
 Required:
-- `BOT_TOKEN`
-- `GEMINI_API_KEY`
+- BOT_TOKEN
+- GEMINI_API_KEY
 
-Optional:
-- `GEMINI_MODEL` (default: `gemini-2.5-flash`)
-- `WEBHOOK_URL` (recommended: your Render URL, e.g. `https://your-service.onrender.com`)
-- `ADMIN_ID` (default: `7268036089`)
-- `ADMIN_USERNAME` (default: `ahmu2021`)
-- `TELEBIRR_NUMBER` (default: `0920210606`)
-- `CBE_ACCOUNT` (default: `1000384896287`)
-- `CBE_NAME` (default: `Ahmed`)
+Recommended:
+- GEMINI_MODEL=gemini-3.6-flash
+- GEMINI_IMAGE_MODEL=gemini-3.1-flash-image
+- ADMIN_ID=7268036089
+- ADMIN_USERNAME=ahmu2021
+- WEBHOOK_URL=https://tirtira-business-bot.onrender.com
 
-## Packages
-- 100 Credits = 50 ETB
-- 500 Credits = 200 ETB
-- 1,000 Credits = 350 ETB
-- 3,000 Credits = 900 ETB
+Payment starter variables:
+- TELEBIRR_NUMBER=0920210606
+- CBE_ACCOUNT=1000384896287
+- CBE_NAME=Ahmed
 
-New users receive 20 free credits.
-Referral: referrer gets 20 credits; new referred user gets 10 bonus credits.
-Each successful AI request costs 1 credit.
+## Credits
+- New user: 20
+- Referral: referrer +20, referred +10
+- AI 1, Text→PDF 2, Photo→PDF 2, PDF→Text 2, OCR 3, Poster 10, AI Image 15
 
-## Payment flow
-User selects Buy Credits -> selects package -> receives payment instructions -> sends transaction/reference + screenshot -> admin gets Approve/Reject buttons -> credits are added only after approval.
-
-SQLite is created automatically as `tirtira.db`.
+## Important
+The payment flow in this V4 remains the existing manual Telebirr/CBE approval flow. Chapa V2 should be integrated separately after testing the content tools.
+SQLite is suitable for a starter/demo deployment; use PostgreSQL for serious production.
