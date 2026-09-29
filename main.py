@@ -1,5 +1,6 @@
 import os
 import io
+import base64
 import logging
 import sqlite3
 import tempfile
@@ -95,16 +96,53 @@ async def ask_ai(text, image_bytes=None, mime="image/jpeg", system=None):
     except Exception:
         logger.exception("Gemini failed"); return SYSTEM_ERROR
 
-async def generate_ai_image(prompt):
-    if not client: return None
+async def generate_ai_image(prompt, image_bytes=None, mime="image/jpeg", aspect_ratio="4:5"):
+    """Generate or edit an image with Gemini 3.1 Flash Image.
+    Uses Google Search grounding when available so advertisements can use current/public information.
+    """
+    if not client:
+        logger.error("GEMINI_API_KEY is missing")
+        return None
     try:
-        r=client.models.generate_content(model=IMAGE_MODEL,contents=prompt,config=types.GenerateContentConfig(response_modalities=["TEXT","IMAGE"]))
-        for p in getattr(r,"parts",[]) or []:
-            if getattr(p,"inline_data",None):
+        contents = []
+        if image_bytes:
+            contents = [types.Part.from_bytes(data=image_bytes, mime_type=mime), prompt]
+        else:
+            contents = [prompt]
+
+        config_kwargs = {
+            "response_modalities": ["IMAGE"],
+            "response_format": {"image": {"aspect_ratio": aspect_ratio, "image_size": "1K"}},
+        }
+        try:
+            config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+        except Exception:
+            # Older google-genai versions may not expose the typed GoogleSearch helper.
+            pass
+
+        try:
+            r = client.models.generate_content(
+                model=IMAGE_MODEL,
+                contents=contents,
+                config=types.GenerateContentConfig(**config_kwargs),
+            )
+        except Exception:
+            # Retry without search grounding; image generation should still work.
+            config_kwargs.pop("tools", None)
+            r = client.models.generate_content(
+                model=IMAGE_MODEL,
+                contents=contents,
+                config=types.GenerateContentConfig(**config_kwargs),
+            )
+
+        for p in getattr(r, "parts", []) or []:
+            if getattr(p, "inline_data", None):
                 return p.inline_data.data
-        for cand in getattr(r,"candidates",[]) or []:
-            for p in getattr(getattr(cand,"content",None),"parts",[]) or []:
-                if getattr(p,"inline_data",None): return p.inline_data.data
+        for cand in getattr(r, "candidates", []) or []:
+            for part in getattr(getattr(cand, "content", None), "parts", []) or []:
+                if getattr(part, "inline_data", None):
+                    return part.inline_data.data
+        logger.warning("Gemini returned no image data")
     except Exception:
         logger.exception("Image generation failed")
     return None
@@ -208,17 +246,32 @@ async def admin_review(update,context):
     except Exception: pass
 
 async def make_ad(update,context, photo_bytes=None):
-    context.user_data["mode"]="ad_photo" if photo_bytes else "ad_text"
+    """Start a professional advertisement workflow. One poster operation costs 10 credits."""
+    context.user_data["mode"] = "ad_photo" if photo_bytes else "ad_text"
     if photo_bytes:
-        if not charge(update.effective_user.id,COSTS["poster"]): await update.message.reply_text("⚠️ 10 Credits ያስፈልጋል።"); return
-        context.user_data["ad_photo_bytes"]=photo_bytes
-        await update.message.reply_text("📸 ፎቶውን ተቀብያለሁ። አሁን የንግዱን ስም፣ አገልግሎት፣ ስልክ እና አካባቢ ጻፍ።")
-    else: await update.message.reply_text("📸 የማስታወቂያ ሀሳብህን ጻፍ። ለምሳሌ፦ ‘ለሞባይል ጥገና ዘመናዊ ማስታወቂያ’")
+        if context.user_data.get("ad_charged") is not True:
+            if not charge(update.effective_user.id, COSTS["poster"]):
+                await update.message.reply_text("⚠️ 10 Credits ያስፈልጋል።")
+                context.user_data.pop("mode", None)
+                return
+            context.user_data["ad_charged"] = True
+        context.user_data["ad_photo_bytes"] = photo_bytes
+        await update.message.reply_text("📸 ፎቶው ተቀብያለሁ። የንግዱን ስም፣ አገልግሎት፣ ስልክ እና አካባቢ ጻፍ።")
+    else:
+        if not charge(update.effective_user.id, COSTS["poster"]):
+            await update.message.reply_text("⚠️ 10 Credits ያስፈልጋል።")
+            context.user_data.pop("mode", None)
+            return
+        context.user_data["ad_charged"] = True
+        await update.message.reply_text("📸 የማስታወቂያውን ሀሳብ ጻፍ። ለምሳሌ፦ Mobile repair shop — screen replacement, battery service, Addis Ababa, 09xxxxxxxx")
 
 async def handle_photo(update,context):
     data=await (await context.bot.get_file(update.message.photo[-1].file_id)).download_as_bytearray(); data=bytes(data)
     mode=context.user_data.get("mode")
-    if mode=="ad_photo": await make_ad(update,context,data); return
+    if mode=="ad_photo":
+        context.user_data["ad_photo_bytes"] = data
+        await update.message.reply_text("📸 ፎቶው ተቀብያለሁ። አሁን የንግዱን ስም፣ አገልግሎት፣ ስልክ እና አካባቢ ጻፍ።")
+        return
     if mode=="photo_pdf":
         if not charge(update.effective_user.id,COSTS["photo_pdf"]): await update.message.reply_text("⚠️ 2 Credits ያስፈልጋል።"); return
         context.user_data.setdefault("pdf_images",[]).append(data); await update.message.reply_text("🖼️ ፎቶ ተጨመረ። ተጨማሪ ፎቶ ላክ ወይም /done ጻፍ።"); return
@@ -235,12 +288,52 @@ async def text_handler(update,context):
         me=await context.bot.get_me(); link=f"https://t.me/{me.username}?start=ref_{u.id}"; await msg.reply_text(f"🎁 Referral\n\nይህን link አጋራ፦\n{link}\n\nአዲስ user: +10 Credits\nአንተ: +20 Credits",reply_markup=kb()); return
     if text=="📊 My Jobs":
         c=db(); rows=c.execute("SELECT prompt FROM jobs WHERE user_id=? ORDER BY id DESC LIMIT 5",(u.id,)).fetchall(); c.close(); await msg.reply_text("📊 Last Jobs:\n"+"\n".join("• "+r[0][:80] for r in rows) if rows else "📊 Job የለም።",reply_markup=kb()); return
+    if text=="✍️ Writing & Ads":
+        context.user_data["mode"]="writing_ads"
+        await msg.reply_text("✍️ ምን እንድጽፍልህ? ለምሳሌ፦ Facebook ad, product description, business caption, sales message...")
+        return
+    if text=="🤖 Business Assistant":
+        context.user_data["mode"]="business_ai"
+        await msg.reply_text("🤖 የንግድህን ጥያቄ ጻፍ። ምክር፣ pricing idea, marketing, customer reply ወይም business plan ልረዳህ እችላለሁ።")
+        return
+    if text=="🌐 Translation":
+        context.user_data["mode"]="translation"
+        await msg.reply_text("🌐 የሚተረጎመውን ጽሁፍ እና የሚፈልገውን ቋንቋ ጻፍ። ለምሳሌ፦ Translate to English: ...")
+        return
+    if text=="💡 Business Ideas":
+        context.user_data["mode"]="business_ideas"
+        await msg.reply_text("💡 ምን አይነት business ሀሳብ እንደምትፈልግ ጻፍ። ለምሳሌ፦ Addis Ababa, low budget, online business.")
+        return
+    if text=="📄 CV & Documents":
+        context.user_data["mode"]="cv_docs"
+        await msg.reply_text("📄 CV/Document ምን እንድረዳህ ጻፍ። ለምሳሌ፦ professional CV summary ስራልኝ።")
+        return
+    if text=="🏆 Certificate / PDF":
+        context.user_data["mode"]="certificate"
+        await msg.reply_text("🏆 የሚፈልገውን legitimate certificate/document text ላክ። እኔ የንድፍ/formatting እገዛ አደርጋለሁ።")
+        return
     if text=="📸 Photo Advertisement": await make_ad(update,context); return
     if text=="🎨 AI Image": context.user_data["mode"]="ai_image"; await msg.reply_text("🎨 ምስሉ ምን እንዲሆን እንደምትፈልግ ጻፍ። ለምሳሌ፦ mobile repair shop with microscope and tools, professional Ethiopian advertisement."); return
     if text=="📄 Text → PDF": context.user_data["mode"]="text_pdf"; await msg.reply_text("📄 PDF የሚሆነውን ጽሁፍ ላክ።"); return
     if text=="📝 PDF → Text": context.user_data["mode"]="pdf_text"; await msg.reply_text("📝 PDF ፋይል ላክ።"); return
     if text=="🖼️ Photo → PDF": context.user_data["mode"]="photo_pdf"; context.user_data["pdf_images"]=[]; await msg.reply_text("🖼️ ፎቶዎችን ላክ። ሲጨርስ /done ጻፍ።"); return
     if text=="🔎 PDF OCR": context.user_data["mode"]="ocr"; await msg.reply_text("🔎 Scanned PDF ላክ፤ OCR በAI እንሞክራለን።"); return
+    if mode in ("writing_ads", "business_ai", "translation", "business_ideas", "cv_docs", "certificate"):
+        system = {
+            "writing_ads": "You are a professional marketing copywriter. Create useful, persuasive but truthful business copy.",
+            "business_ai": "You are a practical small-business assistant. Give actionable advice without inventing facts.",
+            "translation": "You are a precise translator. Preserve meaning and tone. If the requested target language is unclear, ask briefly.",
+            "business_ideas": "You are a practical business idea consultant. Give realistic ideas, costs/steps as estimates only when clearly labeled.",
+            "cv_docs": "You are a professional CV and document writer. Create clean, professional, truthful content.",
+            "certificate": "You help format legitimate certificates and documents. Never fabricate official credentials or claims of authenticity.",
+        }.get(mode)
+        ans = await ask_ai(text, system=system)
+        if ans != SYSTEM_ERROR:
+            job(u.id, text, ans)
+        await msg.reply_text(ans, reply_markup=kb())
+        context.user_data.pop("mode", None)
+        return
+
     if mode=="ai_image":
         if not charge(u.id,COSTS["image"]): await msg.reply_text("⚠️ 15 Credits ያስፈልጋል።"); return
         data=await generate_ai_image("Create a high-quality professional commercial image. "+text+" Avoid fake logos and misleading claims. Clean composition, realistic objects, suitable for social media advertising.")
@@ -250,13 +343,26 @@ async def text_handler(update,context):
     if mode in ("text_pdf",):
         if not charge(u.id,COSTS["pdf"]): await msg.reply_text("⚠️ 2 Credits ያስፈልጋል።"); return
         data=text_to_pdf(text); await msg.reply_document(data,filename="tirtira_document.pdf",caption="📄 Text → PDF"); context.user_data.pop("mode",None); return
-    if mode in ("ad_text","ad_photo"):
-        if mode=="ad_text" and not charge(u.id,COSTS["poster"]): await msg.reply_text("⚠️ 10 Credits ያስፈልጋል።"); return
-        base=context.user_data.get("ad_photo_bytes"); prompt=("Create a professional advertisement poster for this business request: "+text+". Include relevant visual objects such as mobile phone repair tools, microscope, screwdriver, electronics components when relevant. Use readable minimal text, modern layout, realistic commercial photography.")
-        img=await generate_ai_image(prompt) if not base else None
-        if img: await msg.reply_photo(img,caption="📸 Professional Advertisement")
-        else: await msg.reply_photo(fallback_poster("MOBILE REPAIR","Professional Phone Service","Contact: "+" ","Your Location"),caption="📸 Advertisement (ready design)")
-        context.user_data.clear(); return
+    if mode in ("ad_text", "ad_photo"):
+        base = context.user_data.get("ad_photo_bytes")
+        prompt = (
+            "Create a polished, realistic commercial advertisement poster for the business described below. "
+            "Use a modern social-media advertising composition, strong visual hierarchy, realistic relevant objects, "
+            "clean background, professional lighting, and minimal readable English text. Do not invent logos, phone numbers, "
+            "prices, addresses, certifications, or guarantees. If real/public current information is needed, use web search grounding. "
+            "Business request: " + text
+        )
+        img = await generate_ai_image(prompt, base, "image/jpeg", "4:5") if base else await generate_ai_image(prompt, None, "image/jpeg", "4:5")
+        if img:
+            await msg.reply_photo(img, caption="📸 Professional Advertisement — Tirtira Business Studio")
+        else:
+            await msg.reply_photo(
+                fallback_poster("BUSINESS AD", text[:35] or "Professional Service", "", ""),
+                caption="📸 Advertisement — fallback design"
+            )
+        context.user_data.clear()
+        return
+
     if not charge(u.id,COSTS["ai"]): await msg.reply_text("⚠️ Credits አልበቃም።  💳 Buy Credits ይጫኑ።"); return
     ans=await ask_ai(text); job(u.id,text,ans); await msg.reply_text(ans,reply_markup=kb())
 
